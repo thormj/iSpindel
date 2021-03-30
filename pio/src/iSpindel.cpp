@@ -86,7 +86,15 @@ float my_vfact = ADCDIVISOR;
 int16_t my_Offset[6];
 uint8_t my_tempscale = TEMP_CELSIUS;
 int8_t my_OWpin = -1;
+int8_t my_vibepin = 8;
+int8_t my_quiet = 4;
+int my_vibeinterval = (60 / 5 * 12);
 int tiltcommanded;
+
+int16_t my_pwmdelay=250;
+int16_t my_vibepattern[]={250, 500, 750, 1023,0,1023,0,512,0};
+int my_vibepatternlen = (sizeof my_vibepattern / sizeof my_vibepattern[0]);
+int st_vibrated;
 
 // Tilt-commanded modes
 #define COMMANDANGLE  100.0   //"tilted above"; should never ever happen when being used.
@@ -569,6 +577,7 @@ bool uploadData(uint8_t service)
     sender.add("interval", my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
     CONSOLELN(F("\ncalling Ubidots"));
     return sender.sendUbidots(my_token, my_name);
   }
@@ -585,6 +594,7 @@ bool uploadData(uint8_t service)
     sender.add("interval", my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
     CONSOLELN(F("\ncalling MQTT"));
     return sender.sendMQTT(my_server, my_port, my_username, my_password, my_name);
   }
@@ -601,6 +611,7 @@ bool uploadData(uint8_t service)
     sender.add("interval", my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
     CONSOLELN(F("\ncalling ThingSpeak"));
     return sender.sendThingSpeak(my_token, my_channel);
   }
@@ -617,6 +628,7 @@ bool uploadData(uint8_t service)
     sender.add("interval", my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
     CONSOLELN(F("\ncalling InfluxDB"));
     CONSOLELN(String(F("Sending to db: ")) + my_db + String(F(" w/ credentials: ")) + my_username + String(F(":")) + my_password);
     return sender.sendInfluxDB(my_server, my_port, my_db, my_name, my_username, my_password);
@@ -633,6 +645,7 @@ bool uploadData(uint8_t service)
     sender.add("interval", my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
     CONSOLELN(F("\ncalling Prometheus Pushgateway"));
     return sender.sendPrometheus(my_server, my_port, my_job, my_instance);
   }
@@ -654,6 +667,7 @@ bool uploadData(uint8_t service)
     sender.add("interval", my_sleeptime);
     sender.add("RSSI", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
 
     if (service == DTHTTP)
     {
@@ -689,6 +703,7 @@ bool uploadData(uint8_t service)
     sender.add("gravity", Gravity);
     sender.add("ID", ESP.getChipId());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
     CONSOLELN(F("\ncalling FHEM"));
     return sender.sendFHEM(my_server, my_port, my_name);
   }
@@ -701,6 +716,7 @@ bool uploadData(uint8_t service)
     sender.add("U", Volt);
     sender.add("G", Gravity);
     sender.add("C", tiltcommand);
+    sender.add("V", st_vibrated);
     CONSOLELN(F("\ncalling TCONTROL"));
     return sender.sendTCONTROL(my_server, 4968);
   }
@@ -722,6 +738,7 @@ bool uploadData(uint8_t service)
     sender.add("3", voltToSend+"V");
     sender.add("4", String(Gravity, 3));
     sender.add("5", String(tiltcommand, 1));
+    sender.add("6", st_vibrated);
     return sender.sendBlynk(my_token);
   }
 #endif
@@ -735,6 +752,8 @@ bool uploadData(uint8_t service)
     sender.add("Gravity", Gravity);
     sender.add("Rssi[dBm]", WiFi.RSSI());
     sender.add("tiltcommand", tiltcommand);
+    sender.add("vibrated", st_vibrated);
+
     CONSOLELN(F("\ncalling BREWBLOX"));
     return sender.sendBrewblox(my_server, my_port, my_uri, my_username, my_password, my_name);
   }
@@ -922,6 +941,8 @@ float calculateTilt()
         tiltcommanded=1;
         modes newmode = normal;
         ESP.rtcUserMemoryWrite(MODERTCSLOT, (uint32_t *)&newmode, 1);
+        ESP.rtcUserMemoryWrite(VIBERTCSLOT, (uint32_t *)&my_vibeinterval, 1);
+
     }
   }
 
@@ -1266,6 +1287,7 @@ void setup()
       {
         CONSOLELN(F("\nERROR config corrupted"));
         nextmode=normal;  //Can't assume accelerometer data is working...
+        ESP.rtcUserMemoryWrite(VIBERTCSLOT, (uint32_t *)&my_vibeinterval, 1);
       }
     initDS18B20();
     initAccel();
@@ -1292,6 +1314,43 @@ void setup()
         tmp = 0;
         ESP.rtcUserMemoryWrite(WIFIENADDR, &tmp, sizeof(tmp));
       }
+
+      //Run vibration motor if requested
+      uint32_t vibedown;
+      ESP.rtcUserMemoryRead(VIBERTCSLOT, (uint32_t *)&vibedown, 1);
+
+      if(vibedown > my_vibeinterval)
+        vibedown = my_vibeinterval;
+
+      st_vibrated=0;
+      if(vibedown ==1)
+      {
+        CONSOLELN("Vibe Triggered");
+        st_vibrated=1;
+        //Set up the pin...
+        pinMode(my_vibepin, OUTPUT);
+
+        //Run the pattern...
+        for(int vibendx=0;vibendx< my_vibepatternlen; vibendx++)
+        {
+          analogWrite(my_vibepin, my_vibepattern[vibendx]);
+          delay(my_pwmdelay);
+          ESP.wdtFeed();
+        }
+
+        analogWrite(my_vibepin,0);
+        digitalWrite(my_vibepin, LOW);
+        for(int sleeps=0;sleeps<my_quiet;sleeps++)
+        {
+          delay(my_pwmdelay);
+          ESP.wdtFeed();
+        }
+        vibedown = my_vibeinterval;
+      }
+      else
+        if(vibedown > 0)  //0 means don't do it...ever
+          vibedown--;
+      ESP.rtcUserMemoryWrite(MODERTCSLOT, (uint32_t *)&vibedown, 1);
 
       flasher.attach(1, flash);
 

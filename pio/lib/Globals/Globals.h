@@ -116,6 +116,9 @@ extern Ticker flasher;
 // tilt command
 #define MODERTCSLOT 20
 
+// vibration control
+#define VIBERTCSLOT 25
+
 #define UNINIT 0
 
 extern int16_t ax, ay, az;
